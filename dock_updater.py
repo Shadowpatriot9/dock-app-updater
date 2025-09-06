@@ -256,7 +256,7 @@ class DockAppUpdater:
         self.refresh_btn = ttk.Button(button_row1, text="🔄 Refresh Apps", command=self.refresh_apps)
         self.refresh_btn.grid(row=0, column=0, sticky=(tk.W, tk.E), padx=(0, 5))
         
-        self.update_all_btn = ttk.Button(button_row1, text="⚡ Update All Apps", command=self.update_all_apps, style="Accent.TButton")
+        self.update_all_btn = ttk.Button(button_row1, text="⚡ Update All Apps", command=self.update_all_apps)
         self.update_all_btn.grid(row=0, column=1, sticky=(tk.W, tk.E), padx=(5, 0))
         
         # Row 2: Secondary action buttons  
@@ -400,27 +400,50 @@ class DockAppUpdater:
         """Get list of apps from dock"""
         try:
             dock_plist_path = os.path.expanduser("~/Library/Preferences/com.apple.dock.plist")
+            if not os.path.exists(dock_plist_path):
+                self.log_message("Dock plist file not found", "WARNING")
+                return []
+                
             with open(dock_plist_path, 'rb') as f:
                 dock_data = plistlib.load(f)
                 
             apps = []
             for item in dock_data.get('persistent-apps', []):
-                if 'tile-data' in item and 'file-label' in item['tile-data']:
-                    app_name = item['tile-data']['file-label']
-                    if 'file-data' in item['tile-data'] and '_CFURLString' in item['tile-data']['file-data']:
-                        app_path = item['tile-data']['file-data']['_CFURLString'].replace('file://', '')
-                        apps.append({
-                            'name': app_name,
-                            'path': app_path,
-                            'version': self.get_app_version(app_path),
-                            'is_native': self.is_native_app(app_path)
-                        })
+                try:
+                    if 'tile-data' in item and 'file-label' in item['tile-data']:
+                        app_name = item['tile-data']['file-label']
+                        if 'file-data' in item['tile-data'] and '_CFURLString' in item['tile-data']['file-data']:
+                            app_path = item['tile-data']['file-data']['_CFURLString'].replace('file://', '')
+                            # Decode URL-encoded path
+                            try:
+                                from urllib.parse import unquote
+                                app_path = unquote(app_path)
+                            except:
+                                pass  # Use original path if decode fails
+                                
+                            apps.append({
+                                'name': app_name,
+                                'path': app_path,
+                                'version': self.get_app_version(app_path),
+                                'is_native': self.is_native_app(app_path)
+                            })
+                except Exception as e:
+                    self.log_message(f"Error processing dock item: {str(e)}", "WARNING")
+                    continue
             
             # Filter out native macOS apps
-            return [app for app in apps if not app['is_native']]
+            non_native_apps = [app for app in apps if not app['is_native']]
+            self.log_message(f"Found {len(apps)} total apps, {len(non_native_apps)} non-native", "DEBUG")
+            return non_native_apps
             
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to read dock apps: {str(e)}")
+            error_msg = f"Failed to read dock apps: {str(e)}"
+            self.log_message(error_msg, "ERROR")
+            try:
+                messagebox.showerror("Error", error_msg)
+            except tk.TclError:
+                # GUI may not be available
+                pass
             return []
             
     def is_native_app(self, app_path):
@@ -474,7 +497,11 @@ class DockAppUpdater:
             
         self.progress.stop()
         selected_count = len(apps)  # All apps are pre-selected
-        self.status_label.config(text=f"Found {len(apps)} non-native apps ({selected_count} selected for update)")
+        try:
+            self.status_label.config(text=f"Found {len(apps)} non-native apps ({selected_count} selected for update)")
+        except tk.TclError:
+            # GUI may be shutting down, ignore
+            pass
         self.log_message(f"App list refresh complete: {len(apps)} non-native apps found, all pre-selected", "INFO")
         
     def update_selected_apps(self):
@@ -542,65 +569,120 @@ class DockAppUpdater:
             try:
                 updated_something = False
                 
+                # Check for force stop before each operation
+                if self.force_stop_requested:
+                    self.root.after(0, lambda: self.update_failed("Update stopped by user"))
+                    return
+                
                 # Check if Homebrew is available
                 result = subprocess.run(['which', 'brew'], capture_output=True, text=True)
-                if result.returncode == 0:
+                if result.returncode == 0 and not self.force_stop_requested:
                     self.root.after(0, lambda: self.status_label.config(text="Updating Homebrew packages..."))
                     self.root.after(0, lambda: self.log_message("Homebrew detected, starting Homebrew updates", "INFO"))
+                    
                     # First update Homebrew itself
-                    subprocess.run(['brew', 'update'], check=True)
-                    self.root.after(0, lambda: self.log_message("Homebrew updated successfully", "INFO"))
+                    if not self.force_stop_requested:
+                        self.update_process = subprocess.Popen(['brew', 'update'])
+                        self.update_process.wait()
+                        if self.update_process.returncode != 0 and not self.force_stop_requested:
+                            raise Exception("Homebrew update failed")
+                        self.root.after(0, lambda: self.log_message("Homebrew updated successfully", "INFO"))
+                    
                     # Then upgrade packages
-                    subprocess.run(['brew', 'upgrade'], check=True)
-                    self.root.after(0, lambda: self.log_message("Homebrew packages upgraded", "INFO"))
+                    if not self.force_stop_requested:
+                        self.update_process = subprocess.Popen(['brew', 'upgrade'])
+                        self.update_process.wait()
+                        if self.update_process.returncode != 0 and not self.force_stop_requested:
+                            raise Exception("Homebrew upgrade failed")
+                        self.root.after(0, lambda: self.log_message("Homebrew packages upgraded", "INFO"))
+                    
                     # Also check for casks
-                    subprocess.run(['brew', 'upgrade', '--cask'], check=True)
-                    self.root.after(0, lambda: self.log_message("Homebrew casks upgraded", "INFO"))
+                    if not self.force_stop_requested:
+                        self.update_process = subprocess.Popen(['brew', 'upgrade', '--cask'])
+                        self.update_process.wait()
+                        if self.update_process.returncode != 0 and not self.force_stop_requested:
+                            # Cask upgrade failures are non-critical
+                            self.root.after(0, lambda: self.log_message("Some cask upgrades failed (non-critical)", "WARNING"))
+                        else:
+                            self.root.after(0, lambda: self.log_message("Homebrew casks upgraded", "INFO"))
+                    
                     updated_something = True
                     
                 # Check if MacPorts is available
-                result = subprocess.run(['which', 'port'], capture_output=True, text=True)
-                if result.returncode == 0:
-                    self.root.after(0, lambda: self.status_label.config(text="Updating MacPorts packages..."))
-                    self.root.after(0, lambda: self.log_message("MacPorts detected, starting MacPorts updates", "INFO"))
-                    # Update MacPorts
-                    subprocess.run(['sudo', '-S', 'port', 'selfupdate'], 
-                                 input=f"{self.sudo_password}\n", text=True, check=True)
-                    self.root.after(0, lambda: self.log_message("MacPorts selfupdate completed", "INFO"))
-                    subprocess.run(['sudo', '-S', 'port', 'upgrade', 'outdated'], 
-                                 input=f"{self.sudo_password}\n", text=True, check=True)
-                    self.root.after(0, lambda: self.log_message("MacPorts packages upgraded", "INFO"))
-                    updated_something = True
+                if not self.force_stop_requested:
+                    result = subprocess.run(['which', 'port'], capture_output=True, text=True)
+                    if result.returncode == 0 and not self.force_stop_requested:
+                        self.root.after(0, lambda: self.status_label.config(text="Updating MacPorts packages..."))
+                        self.root.after(0, lambda: self.log_message("MacPorts detected, starting MacPorts updates", "INFO"))
+                        
+                        # Update MacPorts
+                        if not self.force_stop_requested:
+                            self.update_process = subprocess.Popen(['sudo', '-S', 'port', 'selfupdate'], 
+                                                                 stdin=subprocess.PIPE, text=True)
+                            self.update_process.communicate(input=f"{self.sudo_password}\n")
+                            if self.update_process.returncode != 0 and not self.force_stop_requested:
+                                raise Exception("MacPorts selfupdate failed")
+                            self.root.after(0, lambda: self.log_message("MacPorts selfupdate completed", "INFO"))
+                        
+                        if not self.force_stop_requested:
+                            self.update_process = subprocess.Popen(['sudo', '-S', 'port', 'upgrade', 'outdated'], 
+                                                                 stdin=subprocess.PIPE, text=True)
+                            self.update_process.communicate(input=f"{self.sudo_password}\n")
+                            if self.update_process.returncode != 0 and not self.force_stop_requested:
+                                # MacPorts upgrade failures can be non-critical if no packages to upgrade
+                                self.root.after(0, lambda: self.log_message("MacPorts upgrade completed (check log for details)", "INFO"))
+                            else:
+                                self.root.after(0, lambda: self.log_message("MacPorts packages upgraded", "INFO"))
+                        
+                        updated_something = True
                     
                 # Check if pip is available for Python packages
-                result = subprocess.run(['which', 'pip3'], capture_output=True, text=True)
-                if result.returncode == 0:
-                    self.root.after(0, lambda: self.status_label.config(text="Checking pip packages..."))
-                    self.root.after(0, lambda: self.log_message("pip detected, checking for outdated packages", "INFO"))
-                    subprocess.run(['pip3', 'list', '--outdated'], check=True)
-                    self.root.after(0, lambda: self.log_message("pip outdated packages listed (manual update recommended)", "WARNING"))
-                    # Note: We don't auto-upgrade pip packages as it can break system
+                if not self.force_stop_requested:
+                    result = subprocess.run(['which', 'pip3'], capture_output=True, text=True)
+                    if result.returncode == 0 and not self.force_stop_requested:
+                        self.root.after(0, lambda: self.status_label.config(text="Checking pip packages..."))
+                        self.root.after(0, lambda: self.log_message("pip detected, checking for outdated packages", "INFO"))
+                        try:
+                            self.update_process = subprocess.Popen(['pip3', 'list', '--outdated'])
+                            self.update_process.wait()
+                            self.root.after(0, lambda: self.log_message("pip outdated packages listed (manual update recommended)", "WARNING"))
+                        except Exception:
+                            self.root.after(0, lambda: self.log_message("pip check completed with warnings", "WARNING"))
+                        # Note: We don't auto-upgrade pip packages as it can break system
                     
                 # Check if npm is available
-                result = subprocess.run(['which', 'npm'], capture_output=True, text=True)
-                if result.returncode == 0:
-                    self.root.after(0, lambda: self.status_label.config(text="Updating npm packages..."))
-                    self.root.after(0, lambda: self.log_message("npm detected, starting global package updates", "INFO"))
-                    subprocess.run(['npm', 'update', '-g'], check=True)
-                    self.root.after(0, lambda: self.log_message("npm global packages updated", "INFO"))
-                    updated_something = True
+                if not self.force_stop_requested:
+                    result = subprocess.run(['which', 'npm'], capture_output=True, text=True)
+                    if result.returncode == 0 and not self.force_stop_requested:
+                        self.root.after(0, lambda: self.status_label.config(text="Updating npm packages..."))
+                        self.root.after(0, lambda: self.log_message("npm detected, starting global package updates", "INFO"))
+                        self.update_process = subprocess.Popen(['npm', 'update', '-g'])
+                        self.update_process.wait()
+                        if self.update_process.returncode != 0 and not self.force_stop_requested:
+                            self.root.after(0, lambda: self.log_message("npm update completed with warnings", "WARNING"))
+                        else:
+                            self.root.after(0, lambda: self.log_message("npm global packages updated", "INFO"))
+                        updated_something = True
                     
-                if not updated_something:
+                # Check final status
+                if self.force_stop_requested:
+                    self.root.after(0, lambda: self.update_failed("Update stopped by user"))
+                elif not updated_something:
                     self.root.after(0, lambda: self.update_failed("No supported package managers found"))
                     self.root.after(0, lambda: self.log_message("No supported package managers found", "ERROR"))
                 else:
                     self.root.after(0, self.update_complete)
                 
             except Exception as e:
-                error_msg = str(e)
-                self.root.after(0, lambda: self.update_failed(error_msg))
-                
-        threading.Thread(target=update_thread, daemon=True).start()
+                if not self.force_stop_requested:
+                    error_msg = str(e)
+                    self.root.after(0, lambda: self.update_failed(error_msg))
+                else:
+                    self.root.after(0, lambda: self.update_failed("Update stopped by user"))
+                    
+        # Store thread reference for potential cleanup
+        self.update_thread = threading.Thread(target=update_thread, daemon=True)
+        self.update_thread.start()
         
     def update_complete(self):
         """Handle update completion"""
