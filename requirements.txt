@@ -1,0 +1,6 @@
+tkinter
+keyring
+plistlib
+subprocess32
+psutil
+requests
