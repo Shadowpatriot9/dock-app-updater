@@ -166,12 +166,16 @@ class DockAppUpdater:
                 self.log_message(f"Failed to terminate process: {str(e)}", "ERROR")
                 
         # Reset UI state
-        self.progress.stop()
-        self.status_label.config(text="Update stopped by user")
-        self.stop_btn.config(state="disabled")
-        self.update_all_btn.config(state="normal")
-        self.update_btn.config(state="normal")
-        self.refresh_btn.config(state="normal")
+        try:
+            self.progress.stop()
+            self.status_label.config(text="Update stopped by user")
+            self.stop_btn.config(state="disabled")
+            self.update_all_btn.config(state="normal")
+            self.update_btn.config(state="normal")
+            self.refresh_btn.config(state="normal")
+        except tk.TclError:
+            # GUI might be shutting down, ignore errors
+            pass
         self.close_after_update = False
         
     def start_update_timeout(self):
@@ -190,22 +194,25 @@ class DockAppUpdater:
         
     def on_treeview_click(self, event):
         """Handle treeview click to toggle app selection"""
-        region = self.app_tree.identify("region", event.x, event.y)
-        if region == "cell":
-            item = self.app_tree.identify_row(event.y)
-            column = self.app_tree.identify_column(event.x)
-            
-            # Only process clicks on the checkbox column
-            if column == "#1" and item:  # #1 is the first column (selected)
-                current_values = list(self.app_tree.item(item, "values"))
-                if current_values:
-                    # Toggle selection
-                    current_values[0] = "☐" if current_values[0] == "☑" else "☑"
-                    self.app_tree.item(item, values=current_values)
-                    
-                    app_name = current_values[1]
-                    selected = current_values[0] == "☑"
-                    self.log_message(f"App {app_name} {'selected' if selected else 'deselected'} for update", "INFO")
+        try:
+            region = self.app_tree.identify("region", event.x, event.y)
+            if region == "cell":
+                item = self.app_tree.identify_row(event.y)
+                column = self.app_tree.identify_column(event.x)
+                
+                # Only process clicks on the checkbox column
+                if column == "#1" and item:  # #1 is the first column (selected)
+                    current_values = list(self.app_tree.item(item, "values"))
+                    if current_values and len(current_values) >= 2:
+                        # Toggle selection
+                        current_values[0] = "☐" if current_values[0] == "☑" else "☑"
+                        self.app_tree.item(item, values=current_values)
+                        
+                        app_name = current_values[1] if len(current_values) > 1 else "Unknown"
+                        selected = current_values[0] == "☑"
+                        self.log_message(f"App {app_name} {'selected' if selected else 'deselected'} for update", "INFO")
+        except Exception as e:
+            self.log_message(f"Error in treeview click handler: {str(e)}", "ERROR")
         
     def setup_ui(self):
         """Setup the main UI components"""
@@ -691,15 +698,19 @@ class DockAppUpdater:
             self.root.after_cancel(self.timeout_timer)
             self.timeout_timer = None
             
-        self.progress.stop()
-        self.status_label.config(text="Updates completed successfully!")
-        self.log_message("All updates completed successfully", "INFO")
+        try:
+            self.progress.stop()
+            self.status_label.config(text="Updates completed successfully!")
+            # Reset button states
+            self.update_all_btn.config(state="normal")
+            self.update_btn.config(state="normal")
+            self.refresh_btn.config(state="normal")
+            self.stop_btn.config(state="disabled")
+        except tk.TclError:
+            # GUI might be shutting down, ignore errors
+            pass
         
-        # Reset button states
-        self.update_all_btn.config(state="normal")
-        self.update_btn.config(state="normal")
-        self.refresh_btn.config(state="normal")
-        self.stop_btn.config(state="disabled")
+        self.log_message("All updates completed successfully", "INFO")
         
         self.refresh_apps()  # Refresh to show new versions
         self.start_auto_close_timer()
@@ -711,18 +722,26 @@ class DockAppUpdater:
             self.root.after_cancel(self.timeout_timer)
             self.timeout_timer = None
             
-        self.progress.stop()
-        self.status_label.config(text="Update failed")
+        try:
+            self.progress.stop()
+            self.status_label.config(text="Update failed")
+            # Reset button states
+            self.update_all_btn.config(state="normal")
+            self.update_btn.config(state="normal")
+            self.refresh_btn.config(state="normal")
+            self.stop_btn.config(state="disabled")
+        except tk.TclError:
+            # GUI might be shutting down, ignore errors
+            pass
+            
         self.close_after_update = False
         self.log_message(f"Update failed: {error}", "ERROR")
         
-        # Reset button states
-        self.update_all_btn.config(state="normal")
-        self.update_btn.config(state="normal")
-        self.refresh_btn.config(state="normal")
-        self.stop_btn.config(state="disabled")
-        
-        messagebox.showerror("Update Failed", f"Failed to update apps: {error}")
+        try:
+            messagebox.showerror("Update Failed", f"Failed to update apps: {error}")
+        except tk.TclError:
+            # GUI might be shutting down, ignore
+            pass
         
     def run(self):
         """Run the application"""
